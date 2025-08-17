@@ -1,0 +1,9 @@
+# Keep secrets out of images
+.env
+*.log
+__pycache__/
+*.pyc
+dist/
+build/
+*.zip
+webhook_urls.txt

@@ -1,0 +1,8 @@
+services:
+  webhook:
+    image: ${IMAGE_REF:-docker.io/zalaghi/protectgram:latest}
+    ports:
+      - "${SERVICE_PORT:-8080}:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
