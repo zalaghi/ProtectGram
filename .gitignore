@@ -1,0 +1,15 @@
+# Secrets
+.env
+webhook_urls.txt
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
