@@ -23,8 +23,8 @@ ProtectGram listens for **webhooks** from UniFi Protect Automations and sends a 
 
 ## Quick start (Debian 12+ host)
 ```bash
-unzip unifi-protect-telegram-webhook-v1.1.2-github-cleanup-HOTFIX5-with-README.zip
-cd unifi-protect-telegram-webhook-v1.1.2-github-cleanup-HOTFIX5-with-README
+unzip protectgram-main.zip
+cd protectgram-main
 sudo bash scripts/install.sh
 ```
 Follow the prompts:
