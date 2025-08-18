@@ -1,4 +1,4 @@
-# ProtectGram — UniFi Protect → Telegram Snapshots (v1.1.2 HOTFIX5)
+# ProtectGram — UniFi Protect → Telegram Snapshots
 
 ProtectGram listens for **webhooks** from UniFi Protect Automations and sends a **snapshot** from the triggered camera to **Telegram**.
 
