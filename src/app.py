@@ -54,23 +54,42 @@ def _ensure_auth():
         _login_with_password()
 
 def _get(url: str):
+    """
+    Make an authenticated GET to UniFi Protect, preferring the TOKEN cookie.
+    If we get 401/403, re-login once and retry to refresh the session.
+    """
     last = None
+    # Ensure we have some auth (cookie or API key)
     if not API_KEY and UNAME and UPASS:
         try:
             _ensure_auth()
         except Exception as e:
             last = e
-    for mode in ("bearer", "cookie"):
-        try:
-            r = requests.get(url, headers=_headers(mode), timeout=25, verify=False)
-            if r.ok:
-                return r
-            last = r
-        except Exception as e:
-            last = e
+    # Try cookie first, then bearer
+    modes = ("cookie", "bearer")
+    for attempt in (1, 2):  # at most one re-login + retry
+        for mode in modes:
+            try:
+                r = requests.get(url, headers=_headers(mode), timeout=25, verify=False)
+                if r.ok:
+                    return r
+                # Unauthorized: re-login once and retry
+                if r.status_code in (401, 403) and attempt == 1 and not API_KEY and UNAME and UPASS:
+                    try:
+                        _login_with_password()
+                        break  # retry fresh session
+                    except Exception as e:
+                        last = e
+                        continue
+                last = r
+            except Exception as e:
+                last = e
+        else:
+            break
     if hasattr(last, "raise_for_status"):
         last.raise_for_status()
     raise RuntimeError(f"Failed GET {url}: {last}")
+
 
 def _normalize_cam_list(data):
     if isinstance(data, list):
