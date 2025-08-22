@@ -1,4 +1,4 @@
-# ProtectGram — UniFi Protect → Telegram Snapshot Webhook (v1.1.2-github-HOTFIX6)
+# ProtectGram — UniFi Protect → Telegram Snapshot Webhook
 
 **What’s new in HOTFIX6**
 - Fixes intermittent **401 Unauthorized** from UniFi Protect by:
