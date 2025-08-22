@@ -1,10 +1,10 @@
 services:
   webhook:
     image: protectgram:latest
-    container_name: protectgram
     build: .
+    container_name: protectgram
+    restart: unless-stopped
     ports:
       - "${SERVICE_PORT:-8080}:8080"
     env_file:
       - .env
-    restart: unless-stopped

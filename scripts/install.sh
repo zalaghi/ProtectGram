@@ -1,37 +1,29 @@
 #!/usr/bin/env bash
-# v1.1.2 (cleanup rev) — Debian 12+
+# Installer for ProtectGram HOTFIX6
 set -Eeuo pipefail
 b_red=$'\e[1;31m'; b_grn=$'\e[1;32m'; b_cyn=$'\e[1;36m'; rst=$'\e[0m'
 die(){ echo "${b_red}ERROR:${rst} $*" >&2; }
 need_root(){ [[ $EUID -eq 0 ]] || { die "Run as root (sudo)."; exit 1; }; }
-apt_install(){ DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; }
-urlencode(){ python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+DEBIAN_FRONTEND=noninteractive
 
 global_cleanup(){
-  echo
-  # Prefer explicit kill of the canonical container name first
+  echo "${b_cyn}[0/9] Preflight: removing previous ProtectGram containers/images/networks…${rst}"
   docker rm -f protectgram >/dev/null 2>&1 || true
-  echo "Checked existing 'protectgram' container."
-  echo "${b_cyn}[0/9] Preflight: removing previous ProtectGram/UniFi webhook containers…${rst}"
   docker ps -a --format '{{.ID}}\t{{.Names}}\t{{.Image}}' | \
     awk 'tolower($0) ~ /(unifi-protect-telegram-webhook|protectgram)/ {print $1}' | \
     xargs -r docker rm -f >/dev/null 2>&1 || true
-
   docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}' | \
     awk 'tolower($0) ~ /(unifi-protect-telegram-webhook|protectgram)/ {print $2}' | \
     xargs -r docker rmi -f >/dev/null 2>&1 || true
-
   docker network ls --format '{{.Name}}' | \
     awk 'tolower($0) ~ /(unifi-protect-telegram-webhook|protectgram)/ {print $1}' | \
     xargs -r docker network rm >/dev/null 2>&1 || true
-
   if [[ -f docker-compose.yml ]]; then
     local touched_env=""
     [[ -f .env ]] || { : > .env; touched_env="yes"; }
     docker compose down -v --remove-orphans --rmi local >/dev/null 2>&1 || true
     [[ "$touched_env" == "yes" ]] && rm -f .env
   fi
-
   docker builder prune -f >/dev/null 2>&1 || true
   docker image prune -f >/dev/null 2>&1 || true
   echo "${b_grn}Cleanup complete.${rst}"
@@ -44,14 +36,14 @@ global_cleanup
 
 echo "${b_cyn}[1/9] Installing deps & Docker…${rst}"
 apt-get update -y >/dev/null 2>&1 || true
-apt_install ca-certificates curl gnupg jq python3 python3-venv openssl
+apt-get install -y ca-certificates curl gnupg jq python3 python3-venv openssl >/dev/null
 if ! command -v docker >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME:-bookworm} stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -y
-  apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   systemctl enable --now docker
 fi
 
@@ -87,13 +79,12 @@ docker compose up -d --build
 
 echo "${b_cyn}[4/9] Waiting for service to be ready…${rst}"
 BASE_WEBHOOK="http://127.0.0.1:${SERVICE_PORT}"
-sleep 1
 ready="no"
-for i in {1..240}; do
-  RESP="$(curl -fs "${BASE_WEBHOOK}/health" 2>/dev/null || true)"
+for i in {1..25}; do
+  RESP="$(curl -fsS --max-time 2 --retry 10 --retry-delay 1 --retry-all-errors "${BASE_WEBHOOK}/health" 2>/dev/null || true)"
   OK=$(jq -r 'try .ok catch "false"' <<<"$RESP" 2>/dev/null || echo "false")
   if [[ "$OK" == "true" ]]; then ready="yes"; break; fi
-  sleep 0.5
+  sleep 1
 done
 [[ "$ready" == "yes" ]] || echo "Service not confirmed yet; continuing…"
 
@@ -114,93 +105,89 @@ if [[ "$USE_FALLBACK" == "yes" ]]; then
   curl -sSk -c "$tmpjar" -H 'Content-Type: application/json' \
     -d "{\"username\":\"${UNIFI_USERNAME}\",\"password\":\"${UNIFI_PASSWORD}\"}" \
     "${UNIFI_ADDR}/api/auth/login" >/dev/null || true
-  CAM_RAW="$(curl -sSk -b "$tmpjar" "${UNIFI_ADDR}/proxy/protect/api/cameras" || true)"
+
+  CAM_RAW=""
+  for ep in /proxy/protect/api/cameras /proxy/protect/api/bootstrap /proxy/protect/v1/cameras; do
+    r="$(curl -sSk -b "$tmpjar" "${UNIFI_ADDR}${ep}" || true)"
+    if [[ -n "$r" && "$r" != "null" ]]; then CAM_RAW="$r"; break; fi
+  done
   rm -f "$tmpjar"
-  [[ -n "$CAM_RAW" ]] || { die "Could not retrieve cameras. Check address/credentials."; exit 1; }
-  CAMERAS_JSON="$(python3 - <<'PY'
+  [[ -n "$CAM_RAW" ]] || { echo "ERROR: Could not retrieve cameras. Check address/credentials."; exit 1; }
+
+  CAMERAS_JSON="$(
+python3 - <<'PY'
 import sys, json
 raw = sys.stdin.read()
 try:
     data = json.loads(raw)
 except Exception:
     print("[]"); sys.exit(0)
-def normalize(d):
-    if isinstance(d, list): return d
-    if isinstance(d, dict):
+
+def looks_like_cam(d):
+    return isinstance(d, dict) and any(k in d for k in ("id","_id","uuid","mac")) and any(k in d for k in ("name","displayName","marketName","type","modelKey","model"))
+
+def pick_cameras(obj):
+    if isinstance(obj, list):
+        return [c for c in obj if looks_like_cam(c)]
+    if isinstance(obj, dict):
         for k in ("cameras","data","items","results"):
-            v = d.get(k)
-            if isinstance(v, list): return v
-        vals = list(d.values())
-        if all(isinstance(v, dict) for v in vals):
-            return vals
+            v = obj.get(k)
+            if isinstance(v, list):
+                cams = [c for c in v if looks_like_cam(c)]
+                if cams: return cams
+        for v in obj.values():
+            if isinstance(v, list):
+                cams = [c for c in v if looks_like_cam(c)]
+                if cams: return cams
+            if isinstance(v, dict):
+                for vv in v.values():
+                    if isinstance(vv, list):
+                        cams = [c for c in vv if looks_like_cam(c)]
+                        if cams: return cams
     return []
-out = []
-for c in normalize(data):
-    if not isinstance(c, dict): continue
-    cid = c.get("id") or c.get("_id") or c.get("uuid") or c.get("mac")
-    name = c.get("name") or c.get("displayName") or c.get("marketName") or f"camera_{(c.get('mac') or c.get('id') or c.get('uuid') or 'unknown')}"
-    model = c.get("marketName") or c.get("type") or c.get("modelKey") or c.get("model") or "camera"
-    out.append({"id": cid, "name": name, "model": model})
-print(json.dumps(out))
+
+cams = pick_cameras(data)
+print(json.dumps([
+    {
+        "id": (c.get("id") or c.get("_id") or c.get("uuid") or c.get("mac")),
+        "name": (c.get("name") or c.get("displayName") or c.get("marketName") or f"camera_{(c.get('mac') or c.get('id') or c.get('uuid') or 'unknown')}"),
+        "model": (c.get("marketName") or c.get("type") or c.get("modelKey") or c.get("model") or "camera"),
+    } for c in cams if isinstance(c, dict)
+]))
 PY
 <<<"$CAM_RAW")"
 fi
 
-mapfile -t IDS   < <(jq -r '.[].id'   <<<"$CAMERAS_JSON")
-mapfile -t NAMES < <(jq -r '.[].name' <<<"$CAMERAS_JSON")
-mapfile -t MODELS< <(jq -r '.[].model'<<<"$CAMERAS_JSON")
+# Render URLs
+LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}'); LOCAL_IP=${LOCAL_IP:-127.0.0.1}
+BASE_URL="http://${LOCAL_IP}:${SERVICE_PORT}"
+export BASE_URL WEBHOOK_TOKEN STAMP_TZ CAMERAS_JSON
+python3 - <<'PY' | tee webhook_urls.txt
+import os, json, urllib.parse
+BASE = os.environ.get("BASE_URL","")
+TOKEN = os.environ.get("WEBHOOK_TOKEN","")
+STAMP_TZ = os.environ.get("STAMP_TZ","Europe/Madrid")
+cams = json.loads(os.environ.get("CAMERAS_JSON","[]"))
+def enc(s): return urllib.parse.quote(str(s), safe="")
+for c in cams:
+    cid = c.get("id") or c.get("_id") or c.get("uuid") or c.get("mac")
+    name = c.get("name") or c.get("displayName") or c.get("marketName") or "camera"
+    model = c.get("model") or c.get("marketName") or c.get("type") or c.get("modelKey") or "camera"
+    caption = f"Motion on {name}"
+    by_id = f"{BASE}/hook/by-id/{cid}?token={enc(TOKEN)}&hq=true&stamp=1&stamp_tz={enc(STAMP_TZ)}&caption={enc(caption)}"
+    by_nm = f"{BASE}/hook/{enc(name)}?token={enc(TOKEN)}&hq=true&stamp=1&stamp_tz={enc(STAMP_TZ)}&caption={enc(caption)}"
+    print(f"• {name} — id: {cid} ({model})")
+    print(f"  By ID (recommended): {by_id}")
+    print(f"  By Name            : {by_nm}\\n")
+PY
 
-(( ${#IDS[@]} )) || { die "No cameras returned."; exit 1; }
+echo "${b_cyn}[6/9] Sending test text to Telegram…${rst}"
+curl -fsS "http://127.0.0.1:${SERVICE_PORT}/test/text?token=${WEBHOOK_TOKEN}&text=ProtectGram%20is%20ready%20✅" >/dev/null || true
 
-echo "${b_grn}Found cameras:${rst}"
-for i in "${!IDS[@]}"; do
-  printf "  [%d] %s — id: %s (%s)\n" "$i" "${NAMES[$i]}" "${IDS[$i]}" "${MODELS[$i]}"
-done
+echo "${b_cyn}[7/9] Where to paste the webhook URLs…${rst}"
+echo "Protect → Automations → your rule → Action: Webhook (POST) → paste a By-ID URL from webhook_urls.txt"
 
-read -rp "Enter camera number(s) (comma-separated): " SELECTION
-SELECTION="${SELECTION// /}"
-IFS=',' read -ra IDX <<< "$SELECTION"
-SELECTED_IDS=(); SELECTED_NAMES=()
-for s in "${IDX[@]}"; do 
-  if [[ ! "$s" =~ ^[0-9]+$ ]]; then die "Bad index: $s"; exit 1; fi
-  if (( s >= ${#IDS[@]} )); then die "Index out of range: $s"; exit 1; fi
-  SELECTED_IDS+=("${IDS[$s]}"); SELECTED_NAMES+=("${NAMES[$s]}")
-done
+echo "${b_cyn}[8/9] Print webhook URLs…${rst}"
+cat webhook_urls.txt || true
 
-LOCAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-BASE_URL="http://${LOCAL_IP:-127.0.0.1}:${SERVICE_PORT}"
-
-echo "${b_cyn}[6/9] Webhook URLs (use in UniFi › Automations › Webhook)…${rst}"
-: > webhook_urls.txt
-for i in "${!SELECTED_IDS[@]}"; do
-  id="${SELECTED_IDS[$i]}"; name="${SELECTED_NAMES[$i]}"
-  cap="$(urlencode "Motion on ${name}")"
-  u1="${BASE_URL}/hook/by-id/${id}?token=${WEBHOOK_TOKEN}&hq=true&stamp=1&stamp_tz=$(urlencode "${STAMP_TZ}")&caption=${cap}"
-  u2="${BASE_URL}/hook/$(urlencode "${name}")?token=${WEBHOOK_TOKEN}&hq=true&stamp=1&stamp_tz=$(urlencode "${STAMP_TZ}")&caption=${cap}"
-  echo "• ${name}" | tee -a webhook_urls.txt
-  echo "  By ID (recommended): ${u1}" | tee -a webhook_urls.txt
-  echo "  By Name            : ${u2}" | tee -a webhook_urls.txt
-done
-
-echo "${b_cyn}[7/9] (Optional) Send TEST snapshots now…${rst}"
-read -rp "Send TEST snapshot to Telegram for each selected camera? [y/N]: " DO_TEST
-DO_TEST="${DO_TEST:-N}"
-if [[ "${DO_TEST,,}" == "y" ]]; then
-  for i in "${!SELECTED_IDS[@]}"; do
-    id="${SELECTED_IDS[$i]}"; name="${SELECTED_NAMES[$i]}"
-    cap="$(urlencode "Test snapshot: ${name}")"
-    echo "→ Testing ${name}…"
-    curl -fsS -X POST "${BASE_WEBHOOK}/hook/by-id/${id}?token=${WEBHOOK_TOKEN}&hq=true&stamp=1&stamp_tz=$(urlencode "${STAMP_TZ}")&caption=${cap}" >/dev/null \
-      && echo "  ${b_grn}Sent.${rst}" || echo "  ${b_red}Failed.${rst}"
-  done
-fi
-
-echo "${b_cyn}[8/9] Final steps (copy to UniFi Automations):${rst}"
-echo "  1) UniFi Protect → Automations → Your rule → Action: Webhook → Method: POST"
-echo "  2) Paste URL from 'webhook_urls.txt' (By ID recommended)."
-echo "  3) Save. Trigger your rule to verify."
-echo "To see the webhook URLs again later, run:  cat webhook_urls.txt"
-echo "Tip: send a text ping anytime:"
-echo "  curl -fsS \"${BASE_WEBHOOK}/test/text?token=${WEBHOOK_TOKEN}&text=Hello\""
-
-echo -e "\n${b_grn}Done.${rst}  Logs:  docker compose logs -f"
+echo "${b_cyn}[9/9] Done.${rst}"
