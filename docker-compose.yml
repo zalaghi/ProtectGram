@@ -1,7 +1,6 @@
 services:
   webhook:
-    image: protectgram:latest
-    build: .
+    image: zalaghi/protectgram:1.1.2-hotfix7
     container_name: protectgram
     restart: unless-stopped
     ports:
