@@ -77,7 +77,7 @@ def _get(url: str):
                 if r.status_code in (401, 403) and attempt == 1 and not API_KEY and UNAME and UPASS:
                     try:
                         _login_with_password()
-                        break  # retry fresh session
+                        break  # retry with fresh cookie
                     except Exception as e:
                         last = e
                         continue
@@ -90,21 +90,6 @@ def _get(url: str):
         last.raise_for_status()
     raise RuntimeError(f"Failed GET {url}: {last}")
 
-
-def _normalize_cam_list(data):
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for k in ("cameras", "data", "items", "results"):
-            v = data.get(k)
-            if isinstance(v, list):
-                return v
-        vals = list(data.values())
-        if all(isinstance(v, dict) for v in vals):
-            return vals
-    return []
-
-
 def _json(url: str):
     r = _get(url)
     try:
@@ -115,18 +100,16 @@ def _json(url: str):
 def _pick_camera_list(obj):
     # Return a list of camera-like dicts from various Protect responses
     def looks_like_cam(d):
-        return isinstance(d, dict) and any(k in d for k in ("id","_id","uuid","mac")) and any(k in d for k in ("name","displayName","marketName","type","modelKey"))
+        return isinstance(d, dict) and any(k in d for k in ("id","_id","uuid","mac")) and any(k in d for k in ("name","displayName","marketName","type","modelKey","model"))
     if isinstance(obj, list):
         return [c for c in obj if looks_like_cam(c)]
     if isinstance(obj, dict):
-        # direct keys
         for k in ("cameras","data","items","results"):
             v = obj.get(k)
             if isinstance(v, list):
                 cams = [c for c in v if looks_like_cam(c)]
                 if cams:
                     return cams
-        # flatten nested dict-of-dicts or dict-of-lists
         for v in obj.values():
             if isinstance(v, list):
                 cams = [c for c in v if looks_like_cam(c)]
@@ -157,7 +140,6 @@ def list_cameras():
                 return cams
         except Exception as e:
             last_err = e
-    # As a last attempt, try bootstrap again after ensuring auth
     try:
         _ensure_auth()
         data = _json(f"{BASE}/proxy/protect/api/bootstrap")
@@ -171,13 +153,13 @@ def list_cameras():
 def nice_name(cam: dict) -> str:
     name = cam.get("name") or cam.get("displayName")
     model = cam.get("marketName") or cam.get("type") or cam.get("modelKey") or "camera"
-    mac = cam.get("mac", "")[-6:] if cam.get("mac") else ""
     if name:
         return name
     ident = cam.get("mac") or cam.get("id") or cam.get("_id") or cam.get("uuid") or "unknown"
     return f"{model}{f'_{ident[-6:]}' if isinstance(ident,str) else ''}"
 
 def snapshot_by_id(cam_id: str, width: int = 1280, hq: bool = False) -> bytes:
+    # Try v1 HQ path first (cookie-friendly), then legacy API path
     try:
         url_v1 = f"{BASE}/proxy/protect/v1/cameras/{cam_id}/snapshot?highQuality={'true' if hq else 'false'}"
         r = _get(url_v1)
@@ -248,7 +230,6 @@ def cameras_endpoint():
         logging.error("Camera listing failed: %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
 @app.get("/test/text")
 def test_text():
     token = request.args.get("token", "")
@@ -272,7 +253,7 @@ def hook_by_name(camera_name):
     cam_id = None
     for c in list_cameras():
         if nice_name(c) == camera_name:
-            cam_id = cam.get("id") or cam.get("_id") or cam.get("uuid") or c.get("mac")
+            cam_id = c.get("id") or c.get("_id") or c.get("uuid") or c.get("mac")
             break
     if not cam_id:
         abort(404)
